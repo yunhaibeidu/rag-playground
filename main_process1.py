@@ -20,6 +20,7 @@ source_names = {
     "Plasticity of the binding pocket in peptide.pdf": "DtpB结合口袋论文(Cell Reports 2023)",
 }
 
+
 def scan_papers(folder):
     papers = []
     for filename in sorted(os.listdir(folder)):
@@ -31,8 +32,10 @@ def scan_papers(folder):
         papers.append({"path": full_path, "source": source})
     return papers
 
+
 papers = scan_papers(papers_dir)
 print(f"扫描到 {len(papers)} 个文件待入库: {[p['source'] for p in papers]}\n")
+
 
 def extract_text_from_file(path):
     ext = os.path.splitext(path)[1].lower()
@@ -168,6 +171,8 @@ def is_chinese(text):
 
 
 # ========== 多轮对话历史 ==========
+# 注意:这两个模块级变量在被import时会被Streamlit那边通过
+# main_process1.chat_history 这种方式直接读写,以维持网页会话的对话状态。
 chat_history = []
 chat_summary = ""
 
@@ -308,29 +313,34 @@ def ask(question, k=3, source_filter=None):
     return answer
 
 
-# ========== 交互式对话循环 ==========
-print("\n" + "=" * 50)
-print("论文问答助手已就绪,输入问题开始提问(输入 退出 结束)")
-print("=" * 50 + "\n")
+# ========== 命令行交互式对话循环 ==========
+# 关键改动:整段命令行交互逻辑包在 __name__ == "__main__" 下面。
+# 这样直接 `python main_process1.py` 运行时,行为和以前完全一样;
+# 但被 app.py 用 `import main_process1` 时,不会触发这个while循环卡住,
+# 只会执行上面"建库+定义ask()函数"的部分,可以安全地把ask()拿去给Streamlit用。
+if __name__ == "__main__":
+    print("\n" + "=" * 50)
+    print("论文问答助手已就绪,输入问题开始提问(输入 退出 结束)")
+    print("=" * 50 + "\n")
 
-while True:
-    try:
-        user_input = input("你: ").strip()
-    except (EOFError, KeyboardInterrupt):
-        print("\n检测到中断,已退出对话。")
-        break
+    while True:
+        try:
+            user_input = input("你: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n检测到中断,已退出对话。")
+            break
 
-    if not user_input:
-        continue
+        if not user_input:
+            continue
 
-    if user_input.lower() in ("退出", "exit", "quit"):
-        print("已退出对话,再见。")
-        break
+        if user_input.lower() in ("退出", "exit", "quit"):
+            print("已退出对话,再见。")
+            break
 
-    try:
-        ask(user_input)
-    except Exception as e:
-        print(f"\n[出错了,这一轮没有得到回答]: {e}")
-        print("如果是连接错误,检查一下Ollama是否还在运行(ollama serve)。\n")
+        try:
+            ask(user_input)
+        except Exception as e:
+            print(f"\n[出错了,这一轮没有得到回答]: {e}")
+            print("如果是连接错误,检查一下Ollama是否还在运行(ollama serve)。\n")
 
-    print()
+        print()

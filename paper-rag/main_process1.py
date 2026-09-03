@@ -170,6 +170,71 @@ def is_chinese(text):
     return bool(re.search(r'[\u4e00-\u9fff]', text))
 
 
+# ========== 数字一致性机械校验 ==========
+# 目的:不再单纯依赖prompt让模型"自己判断数字是否一致",
+# 而是用代码把问题里提到的数字和检索原文里出现的数字直接做字符串比对,
+# 如果发现模型给出了错误的"是"判断,直接在代码层强制纠正,不给模型犯错的空间。
+
+def extract_numbers(text):
+    """提取文本里形如 8400 / 8,400 的数字(带千位逗号也能识别)"""
+    return re.findall(r'\d[\d,]*\d|\d', text)
+
+
+def normalize_num(s):
+    """去掉千位逗号,方便统一比较"""
+    return s.replace(",", "")
+
+
+def is_confirmation_question(question):
+    """判断问题是不是那种\"是不是/是否/对吗\"式的确认句"""
+    return bool(re.search(r'是不是|是否|吗|对吗|对不对', question))
+
+
+def verify_number_consistency(question, context, answer):
+    """
+    核对逻辑:
+    1. 从用户问题里提取长度>=3位的数字(过滤掉\"1\"\"2\"这种太短、容易误判的小数字)。
+       如果问题里根本没提到具体数字,不需要校验,原样返回。
+    2. 从检索到的[context]原文里提取所有出现过的数字。
+    3. 如果问题里的数字在原文中完全找不到对应(说明用户猜的数字很可能是错的),
+       且这是一个\"是不是/吗\"式的确认句,且模型的回答却以\"是\"开头,
+       说明模型判断错了——直接在代码层强制把回答改成\"不是\",
+       并把原文中实际出现的、位数相近的数字作为提示附上,不再依赖模型自己纠错。
+    4. 只要问题数字在原文里能找到,或者模型本来就回答了\"不是\",就不做任何改动,
+       避免校验逻辑反而画蛇添足。
+    返回 (最终答案, 是否发生了纠正: bool)
+    """
+    q_nums = {normalize_num(n) for n in extract_numbers(question)}
+    q_nums = {n for n in q_nums if len(n) >= 3}
+    if not q_nums:
+        return answer, False
+
+    ctx_nums = {normalize_num(n) for n in extract_numbers(context)}
+    mismatched = q_nums - ctx_nums
+    if not mismatched:
+        return answer, False
+
+    if not is_confirmation_question(question):
+        return answer, False
+
+    if not answer.strip().startswith("是"):
+        # 模型本来就没说"是",没有犯之前那种自相矛盾的错,不需要动
+        return answer, False
+
+    candidates = sorted({n for n in ctx_nums if len(n) >= 3}, key=len)
+    if candidates:
+        hint = f"原文中实际出现的相关数字包括: {', '.join(candidates)}。"
+    else:
+        hint = "原文中未找到与之对应的具体数字记载。"
+
+    corrected = (
+        f"不是。你提到的数字({'、'.join(sorted(mismatched))})在检索到的原文中没有找到完全对应的记载,"
+        f"{hint}\n\n"
+        f"[系统自动校验提示:模型原本的回答以\"是\"开头,经数字核对后发现与原文不符,已由代码自动更正为\"不是\",请以此为准。]"
+    )
+    return corrected, True
+
+
 # ========== 多轮对话历史 ==========
 # 注意:这两个模块级变量在被import时会被Streamlit那边通过
 # main_process1.chat_history 这种方式直接读写,以维持网页会话的对话状态。
@@ -277,9 +342,32 @@ def ask(question, k=3, source_filter=None):
 
 严格遵守:
 1. 只依据[检索到的论文内容]作答,不要编造内容中没有的信息。
-2. 如果用户的最新问题是在做判断、确认或纠错(比如"是不是分开的""是8500吗"),
-   必须直接以"是"或"不是"这两个字开头作为第一句话,之后才展开解释原因。
-   禁止先复述用户问题里的数字或说法再纠正,开头必须是明确的判断结论,不能自相矛盾。
+2. 如果用户的最新问题是在做判断、确认或纠错(比如"是不是分开的""是8500吗"):
+   a) 先判断问题里是否包含具体的、可核实的事实断言(数字、名称、日期、是否发生某事等)。
+   b) 如果包含,必须先在[检索到的论文内容]里逐字查找对应的事实,逐一核对是否完全一致
+      (数字要完全相等,名称要完全对应,不能因为"数量级接近"或"看起来像"就算一致)。
+   c) 只有完全一致才能回答"是";只要有任何不一致(哪怕只是数字、单位、名称有差异),
+      必须回答"不是",并明确指出原文中真正的数字/名称/事实是什么。
+   d) 如果[检索到的论文内容]里根本没有出现用户问题中提到的那个具体事实,不能默认为"是",
+      而要回答"资料中没有找到这个具体说法",然后再补充资料中实际提到的相关内容。
+   e) 回答必须直接以"是"或"不是"这两个字开头作为第一句话,之后才展开解释原因,
+      禁止先复述用户问题里的数字或说法再纠正,开头必须是明确的判断结论,不能自相矛盾。
+
+   参考示例(务必模仿这个推理方式,不要被"倾向说是"的语言习惯带偏):
+   示例1 -
+   用户问:"是8500条吗"
+   [检索到的论文内容]里写的是:"all 8,400 possible di- and tripeptides"
+   正确回答应该是:"不是。原文中提到的数字是8,400条,而不是8500条。"
+   (注意:8400和8500虽然接近,但数字不同就是不同,绝对不能说"这与8500完全一致"或"是")
+
+   示例2 -
+   用户问:"是不是8400呢"
+   [检索到的论文内容]里写的是:"all 8,400 possible di- and tripeptides"
+   正确回答应该是:"是。原文中提到的正是8,400条di-和tripeptides。"
+   (数字完全相等,才能回答"是")
+
+   在生成回答前,请先在心里默念一遍:"用户说的数字/名称,和原文里的数字/名称,是不是逐字符完全一样?"
+   只要不是完全一样,答案就必须是"不是",不允许因为数量级接近或看起来像就模糊处理。
 3. 当用户问"结论是什么""有没有关于XX的结论/发现"时,不要求原文必须出现"conclusion"这个词才算数。
    只要[检索到的论文内容]里出现了具体的发现、数据、现象描述或作者的判断性陈述,
    都应视为可以回答的结论性内容,直接总结给用户,不要因为没看到"结论"字样就说"没有提及"。
@@ -296,6 +384,11 @@ def ask(question, k=3, source_filter=None):
 
     answer = llm.invoke(prompt).strip()
 
+    # 代码层机械校验:防止模型对数字类事实做出自相矛盾的"是"判断
+    answer, corrected = verify_number_consistency(question, context, answer)
+    if corrected:
+        print("[数字校验] 检测到模型判断与原文数字不一致,已自动纠正为\"不是\"")
+
     chat_history.append((question, answer))
     compress_history_if_needed()
 
@@ -311,6 +404,86 @@ def ask(question, k=3, source_filter=None):
         print(f"\n[来源{i} - {src}] {doc.page_content[:150]}...")
 
     return answer
+
+
+def draft(topic, k=6, source_filter=None, style="学术综述"):
+    """
+    写作助手模式:根据检索到的多篇文献片段,生成一段可直接用于论文/文档的文字,
+    并在句子后面标注对应的来源编号,方便使用者核对和替换成正式引用格式。
+
+    和ask()的区别:
+    - ask()是回答一个具体问题,篇幅短、语气是对话式的;
+    - draft()是围绕一个主题/论点生成一段连续的书面文字,篇幅更长、语气是书面化的,
+      并且必须在陈述句后标来源编号(如"...[来源1]"),而不是像ask()那样只在最后列来源。
+
+    参数:
+        topic: 要写的主题或论点,比如"DtpB结合口袋的柔性如何支持底物多样性"
+        k: 检索片段数量,写作场景通常需要比问答更多的上下文,默认6
+        source_filter: 可选,限定只从某一篇文献里检索
+        style: 写作风格提示,比如"学术综述""简明摘要""方法部分"等,可自由传入
+
+    返回:
+        生成的文字(str),同时打印出来方便直接复制
+    """
+    # 写作场景不需要指代消解(没有多轮对话依赖),但同样需要把中文主题转成
+    # 适合语义检索的英文query,复用get_search_query,history传空即可。
+    query = get_search_query(topic, [])
+    print(f"[检索用英文query]: {query}")
+
+    if source_filter:
+        results = vectorstore.similarity_search(
+            query, k=k, filter={"source": source_filter}
+        )
+    else:
+        results = vectorstore.similarity_search(query, k=k)
+
+    context_parts = []
+    for i, doc in enumerate(results, 1):
+        src = doc.metadata.get("source", "未知来源")
+        context_parts.append(f"[来源{i}: {src}]\n{doc.page_content}")
+    context = "\n\n---\n\n".join(context_parts)
+
+    prompt = f"""你是一名学术写作助手,请根据下面的[检索到的文献片段],针对指定主题写一段{style}性质的文字,用中文书写。
+
+严格遵守:
+1. 只依据[检索到的文献片段]里的内容组织文字,不要编造片段之外的信息、数据或结论。
+2. 每一句陈述性的话(尤其是包含具体数据、方法、结论的句子)后面,必须标注对应的来源编号,
+   格式为句末加"[来源N]",N对应下面片段标注的编号。如果一句话综合了多个来源,
+   可以写"[来源1][来源3]"。不允许出现没有来源标注的事实性陈述。
+3. 如果[检索到的文献片段]中的信息不足以支撑某个角度,不要为了行文完整而编造,
+   宁可少写或明确说明"现有资料未涉及此方面",也不能虚构。
+4. 文字要连贯成段,符合{style}的书面语体,不要写成问答或列点形式,除非主题本身要求列点。
+5. 结尾不需要额外总结"以上来源于XX文献"这类元话语,来源标注已经在句内完成。
+6. 严禁在结尾添加脱离[检索到的文献片段]的升华式结论或意义阐述
+   (例如"这对XX领域的整体理解具有重要意义""有助于维持XX系统的完整性"等)。
+   每一句话(包括最后一句)都必须能在[检索到的文献片段]里找到直接对应的依据并标注来源,
+   不能因为要让段落显得完整、有总结感,就添加片段里没有明确支持的引申性结论。
+7. 只生成一段最终文字,不要先输出"草稿"或"示例"再输出"正式版本",
+   也不要重复生成两遍相近的内容,只输出一个最终版本即可。
+
+[检索到的文献片段]
+{context}
+
+[写作主题/论点]
+{topic}
+
+[生成的文字]
+"""
+
+    generated = llm.invoke(prompt).strip()
+
+    print("=" * 50)
+    print(f"主题: {topic}")
+    print("=" * 50)
+    print("生成内容:")
+    print(generated)
+    print("=" * 50)
+    print("来源编号对照:")
+    for i, doc in enumerate(results, 1):
+        src = doc.metadata.get("source", "未知来源")
+        print(f"[来源{i} - {src}] {doc.page_content[:150]}...")
+
+    return generated
 
 
 # ========== 命令行交互式对话循环 ==========

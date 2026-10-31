@@ -1,4 +1,4 @@
-# paper-rag 依赖(两个版本通用)
+# 全仓库依赖(paper-rag 两个版本 + code-assistant 通用)
 # 安装: pip install -r requirements.txt
 # 另需单独安装 Ollama: https://ollama.com ,并拉取模型:
 #   ollama pull llama3
@@ -19,5 +19,8 @@ python-docx
 bm25s
 
 # ---- 界面 ----
-streamlit          # streamlit版本
-PySide6            # exe版本(桌面界面)
+streamlit          # paper-rag streamlit版本 / code-assistant
+PySide6            # paper-rag exe版本(桌面界面)
+
+# ---- code-assistant ----
+requests           # 调用 Ollama API

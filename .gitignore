@@ -1,0 +1,35 @@
+# ===== Python =====
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.venv/
+venv/
+env/
+
+# ===== PyInstaller 打包产物 =====
+build/
+dist/
+*.spec
+*.exe
+
+# ===== 运行时数据（索引、数据库、上传的论文）=====
+data/
+chroma_db/
+chroma/
+*.db
+*.sqlite
+*.sqlite3
+projects/
+uploads/
+
+# ===== Streamlit =====
+.streamlit/secrets.toml
+
+# ===== 编辑器 / 系统 =====
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log

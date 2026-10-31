@@ -1,0 +1,26 @@
+# 全仓库依赖(paper-rag 两个版本 + code-assistant 通用)
+# 安装: pip install -r requirements.txt
+# 另需单独安装 Ollama: https://ollama.com ,并拉取模型:
+#   ollama pull llama3
+#   ollama pull nomic-embed-text
+
+# ---- RAG 核心 ----
+langchain-core
+langchain-text-splitters
+langchain-ollama
+langchain-chroma
+chromadb
+
+# ---- 文档解析 ----
+pypdf
+python-docx
+
+# ---- 检索(exe版本用到 BM25 混合检索) ----
+bm25s
+
+# ---- 界面 ----
+streamlit          # paper-rag streamlit版本 / code-assistant
+PySide6            # paper-rag exe版本(桌面界面)
+
+# ---- code-assistant ----
+requests           # 调用 Ollama API

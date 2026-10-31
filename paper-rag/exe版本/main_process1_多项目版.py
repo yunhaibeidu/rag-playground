@@ -57,7 +57,7 @@ os.makedirs(PROJECTS_ROOT, exist_ok=True)
 db = ProjectDB(DB_PATH)
 
 SUPPORTED_EXTS = {".pdf", ".docx", ".txt"}
-
+_splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=100)
 #embeddings = OllamaEmbeddings(model="nomic-embed-text")
 #llm = OllamaLLM(model="llama3")
 embeddings = OllamaEmbeddings(model="nomic-embed-text")
@@ -65,7 +65,6 @@ embeddings = OllamaEmbeddings(model="nomic-embed-text")
 # LLM 运行时可切换（问答/写作都复用这个全局 llm）
 _llm_lock = threading.Lock()
 _llm_base_url = "http://localhost:11434"  # 你之前exe能跑，通常就是这个，不需要你改URL
-can_papers
 llm_model_name = "llama3"  # 默认兜底
 llm = OllamaLLM(model=llm_model_name, base_url=_llm_base_url)
 

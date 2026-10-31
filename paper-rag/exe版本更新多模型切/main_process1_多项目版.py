@@ -65,7 +65,7 @@ embeddings = OllamaEmbeddings(model="nomic-embed-text")
 # LLM 运行时可切换（问答/写作都复用这个全局 llm）
 _llm_lock = threading.Lock()
 _llm_base_url = "http://localhost:11434"  # 你之前exe能跑，通常就是这个，不需要你改URL
-
+can_papers
 llm_model_name = "llama3"  # 默认兜底
 llm = OllamaLLM(model=llm_model_name, base_url=_llm_base_url)
 
@@ -135,30 +135,6 @@ def scan_papers(folder):
         source = os.path.splitext(filename)[0]
         papers.append({"path": full_path, "filename": filename, "source": source})
     return papers
-
-
-def extract_text_from_file(path):
-    ext = os.path.splitext(path)[1].lower()
-
-    if ext == ".pdf":
-        reader = PdfReader(path)
-        full_text = ""
-        for page in reader.pages:
-            text = page.extract_text()
-            full_text += (text or "") + "\n"
-        return full_text
-
-    elif ext == ".docx":
-        doc = Document(path)
-        paragraphs = [p.text for p in doc.paragraphs]
-        return "\n".join(paragraphs)
-
-    elif ext == ".txt":
-        with open(path, "r", encoding="utf-8") as f:
-            return f.read()
-
-    else:
-        raise ValueError(f"暂不支持的文件格式: {ext} (文件: {path})")
 
 
 def compute_manifest(papers):
@@ -281,69 +257,6 @@ def delete_project(project_id):
     return True
 
 
-def sanitize_folder_name(name):
-    """
-    把项目名清洗成安全的文件夹名片段:
-    去掉Windows/Mac都不允许的字符,去掉首尾空格和点,限制长度,空名兜底。
-    """
-    cleaned = re.sub(r'[\\/:*?"<>|]', "_", name).strip()
-    cleaned = cleaned.strip(". ")
-    if not cleaned:
-        cleaned = "未命名项目"
-    return cleaned[:50]
-
-
-def get_project_paths(project_id, project_name):
-    """
-    给定项目id和项目名,拼出这个项目专属的papers目录和chroma_db目录。
-    文件夹名格式为"{id}_{清洗后的项目名}"(如"1_测试论文1"),
-    既靠id保证唯一不冲突,又能在磁盘上直接看出是哪个项目,不用再去数据库反查id对应的名字。
-
-    兼容处理:早期版本文件夹名只用纯id(如"1"),如果检测到这种旧文件夹还存在、
-    而新格式文件夹还不存在,就自动重命名迁移过去,不需要手动搬数据。
-    """
-    safe_name = sanitize_folder_name(project_name)
-    folder_name = f"{project_id}_{safe_name}"
-    project_dir = os.path.join(PROJECTS_ROOT, folder_name)
-
-    old_style_dir = os.path.join(PROJECTS_ROOT, str(project_id))
-    if (
-        old_style_dir != project_dir
-        and os.path.isdir(old_style_dir)
-        and not os.path.exists(project_dir)
-    ):
-        try:
-            os.rename(old_style_dir, project_dir)
-            print(f"[已迁移] 检测到旧版纯id文件夹,已重命名为: {folder_name}")
-        except (PermissionError, OSError) as e:
-            # 迁移只是便利性功能,失败不应该中断主流程。
-            # 常见原因:文件夹被资源管理器/其他进程占用,或被云同步/杀毒软件临时锁定。
-            print(f"[迁移跳过] 无法将旧文件夹「{old_style_dir}」重命名为「{folder_name}」({e})")
-            print("           可能是该文件夹正被其他程序占用,继续使用旧文件夹,不影响本次使用。")
-            project_dir = old_style_dir
-
-    papers_dir = os.path.join(project_dir, "papers")
-    persist_dir = os.path.join(project_dir, "chroma_db")
-    os.makedirs(papers_dir, exist_ok=True)
-    return papers_dir, persist_dir
-
-
-def scan_papers(folder):
-    """
-    扫描项目专属papers文件夹。
-    source_name这里先简单用文件名去掉后缀,以后如果想要自定义显示名,
-    可以在这里加一个"文件名->自定义名称"的映射表,或者接入界面让用户手动改。
-    """
-    papers = []
-    for filename in sorted(os.listdir(folder)):
-        ext = os.path.splitext(filename)[1].lower()
-        if ext not in SUPPORTED_EXTS:
-            continue
-        full_path = os.path.join(folder, filename)
-        source = os.path.splitext(filename)[0]
-        papers.append({"path": full_path, "filename": filename, "source": source})
-    return papers
-
 
 def extract_text_from_file(path):
     ext = os.path.splitext(path)[1].lower()
@@ -369,35 +282,6 @@ def extract_text_from_file(path):
         raise ValueError(f"暂不支持的文件格式: {ext} (文件: {path})")
 
 
-def compute_manifest(papers):
-    """给当前papers列表算指纹:{filename: md5}。注意key用filename而不是完整路径,
-    因为完整路径里含有project_id,换项目路径必然不同,但这不是我们关心的变化,
-    我们只关心"这个文件名对应的文件内容有没有变"。"""
-    manifest = {}
-    for paper in papers:
-        with open(paper["path"], "rb") as f:
-            content = f.read()
-        manifest[paper["filename"]] = hashlib.md5(content).hexdigest()
-    return manifest
-
-
-def safe_remove_dir(path):
-    """安全删除向量库目录,释放文件句柄后再删,避免Windows下删除报错。"""
-    global vectorstore
-    if "vectorstore" in globals():
-        del vectorstore
-    gc.collect()
-    time.sleep(0.5)
-    if os.path.exists(path):
-        shutil.rmtree(path, ignore_errors=True)
-
-
-_splitter = RecursiveCharacterTextSplitter(
-    chunk_size=1000,
-    chunk_overlap=200,
-    separators=["\n\n", "\n", ". ", " ", ""]
-)
-
 
 # ========== 当前项目状态:模块级全局变量,初始为空,调用load_project()后才被填充 ==========
 # GUI和CLI的流程都是: 先用list_projects()/create_project()选出一个项目,
@@ -418,12 +302,7 @@ MAX_RAW_TURNS = 6
 KEEP_RECENT_TURNS = 3
 
 
-"""
-修复方案：在 main_process1_多项目版.py 中找到 load_project() 函数，
-替换以下部分（从 "if need_rebuild:" 开始到函数结束）。
-"""
 
-# ========== 修复：改进的 load_project() 函数 ==========
 def load_project(project_id, project_name, log=print):
     """
     加载(或切换到)指定项目:扫描论文、必要时重建向量库、建BM25索引、加载历史对话。
@@ -780,23 +659,7 @@ Output only the English search query, nothing else."""
     return rewritten if rewritten else question
 
 
-# ========== 使用说明 ==========
-"""
-1. 打开 main_process1_多项目版.py
 
-2. 找到 def ask(question, k=6, source_filter=None): 函数
-   用上面的修复版本替换整个函数体
-
-3. 找到 def get_search_query(question, history): 函数  
-   用上面的修复版本替换整个函数体
-
-4. 重启 GUI，用 Qwen 3.5 9B 试试，应该能正常回答了
-
-核心改进：
-- Prompt 从 1500+ 字符缩减到 200 字符左右
-- 添加了空返回检测和容错降级
-- Qwen 3.5 9B 对简洁指令的处理稳定得多
-"""
 
 
 def is_meta_question(question):
@@ -842,9 +705,6 @@ def answer_meta_question(question):
 
     return answer
 
-
-# ========== 修复 Qwen 3.5 9B 空回答问题 ==========
-# 在 main_process1_多项目版.py 中找到 ask() 函数，替换下面这段
 
 def ask(question, k=6, source_filter=None):
     """修复后的版本：添加空回答容错"""

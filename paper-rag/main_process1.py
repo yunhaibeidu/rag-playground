@@ -11,14 +11,32 @@ import time
 import hashlib
 import json
 
-# ========== 第一步:扫描文件夹,自动发现所有要入库的文件 ==========
-papers_dir = "G:/test-localai/papers"
+# ========== 路径配置:全部相对于本文件所在目录的 data/ 子目录 ==========
+# 目录结构:
+#   streamlit版本/
+#     main_process1.py
+#     app.py
+#     data/
+#       papers/                 <- 把 PDF / DOCX / TXT 放这里
+#       chroma_db/              <- 向量库(自动生成)
+#       indexed_manifest.json   <- 文件指纹(自动生成)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, "data")
+papers_dir = os.path.join(DATA_DIR, "papers")
+persist_dir = os.path.join(DATA_DIR, "chroma_db")
+manifest_path = os.path.join(DATA_DIR, "indexed_manifest.json")
 
+os.makedirs(papers_dir, exist_ok=True)
+
+# ========== 模型配置 ==========
+EMBED_MODEL = "nomic-embed-text"
+LLM_MODEL = "llama3"
+
+# ========== 第一步:扫描文件夹,自动发现所有要入库的文件 ==========
 SUPPORTED_EXTS = {".pdf", ".docx", ".txt"}
 
-source_names = {
-    "Plasticity of the binding pocket in peptide.pdf": "DtpB结合口袋论文(Cell Reports 2023)",
-}
+# 可选:给某些文件起一个更易读的来源名,没写的默认用文件名(去掉扩展名)
+source_names = {}
 
 
 def scan_papers(folder):
@@ -34,6 +52,11 @@ def scan_papers(folder):
 
 
 papers = scan_papers(papers_dir)
+if not papers:
+    raise SystemExit(
+        f"在 {papers_dir} 里没有找到任何 PDF/DOCX/TXT 文件,"
+        f"请先把论文放进去再运行。"
+    )
 print(f"扫描到 {len(papers)} 个文件待入库: {[p['source'] for p in papers]}\n")
 
 
@@ -61,13 +84,8 @@ def extract_text_from_file(path):
         raise ValueError(f"暂不支持的文件格式: {ext} (文件: {path})")
 
 
-embeddings = OllamaEmbeddings(model="nomic-embed-text")
-llm = OllamaLLM(model="llama3")
-
-persist_dir = "G:/test-localai/chroma_db"
-# 指纹文件:记录上次建库时,每个论文文件的内容md5。
-# 用来判断"papers文件夹内容有没有变化",没变化就跳过整个重建流程。
-manifest_path = "G:/test-localai/indexed_manifest.json"
+embeddings = OllamaEmbeddings(model=EMBED_MODEL)
+llm = OllamaLLM(model=LLM_MODEL)
 
 
 def compute_manifest(papers):
@@ -292,13 +310,18 @@ def compress_history_if_needed():
     print(f"[历史已压缩] 早期内容已合并进摘要,chat_history现在只保留最近{KEEP_RECENT_TURNS}轮")
 
 
+# 领域提示:告诉模型论文大致属于哪个领域,帮助它用准确的英文术语改写检索词。
+# 换别的领域论文时改这一行即可。
+DOMAIN_HINT = "a biochemistry/pharmacology paper about peptide transporters, molecular docking, and binding pockets"
+
+
 def get_search_query(question, history):
     """
     合并"指代消解"和"翻译成英文"为一步。
     chat_summary只在这里用于帮助理解指代,不会进入最终答案生成环节。
     """
     history_text = format_history(history, chat_summary)
-    prompt = f"""You are rewriting a user's question into a search query for a biochemistry/pharmacology paper about peptide transporters, molecular docking, and binding pockets. Use accurate scientific terminology (e.g. "peptide" not "dot", "docking" not "connection", "binding pocket", "tripeptide", "dipeptide", etc.).
+    prompt = f"""You are rewriting a user's question into a search query for {DOMAIN_HINT}. Use accurate scientific terminology.
 
 Below is the recent conversation history (may be in Chinese) and the user's latest question (may be in Chinese, and may contain pronouns like "this number" / "it" that depend on the history to understand).
 
@@ -335,7 +358,7 @@ def ask(question, k=3, source_filter=None):
         context_parts.append(f"[来源: {src}]\n{doc.page_content}")
     context = "\n\n---\n\n".join(context_parts)
 
-    # 关键改动:生成最终答案的prompt不再塞入chat_summary。
+    # 生成最终答案的prompt不塞入chat_summary。
     # chat_summary只用于get_search_query()里的指代消解,
     # 避免模型把历史摘要里的旧结论当成对当前问题的答案直接复述。
     prompt = f"""请只根据下面的[检索到的论文内容]回答用户的最新问题,用中文回答。
@@ -417,7 +440,7 @@ def draft(topic, k=6, source_filter=None, style="学术综述"):
       并且必须在陈述句后标来源编号(如"...[来源1]"),而不是像ask()那样只在最后列来源。
 
     参数:
-        topic: 要写的主题或论点,比如"DtpB结合口袋的柔性如何支持底物多样性"
+        topic: 要写的主题或论点
         k: 检索片段数量,写作场景通常需要比问答更多的上下文,默认6
         source_filter: 可选,限定只从某一篇文献里检索
         style: 写作风格提示,比如"学术综述""简明摘要""方法部分"等,可自由传入
@@ -487,10 +510,10 @@ def draft(topic, k=6, source_filter=None, style="学术综述"):
 
 
 # ========== 命令行交互式对话循环 ==========
-# 关键改动:整段命令行交互逻辑包在 __name__ == "__main__" 下面。
-# 这样直接 `python main_process1.py` 运行时,行为和以前完全一样;
-# 但被 app.py 用 `import main_process1` 时,不会触发这个while循环卡住,
-# 只会执行上面"建库+定义ask()函数"的部分,可以安全地把ask()拿去给Streamlit用。
+# 整段命令行交互逻辑包在 __name__ == "__main__" 下面。
+# 直接 `python main_process1.py` 运行时进入命令行问答;
+# 被 app.py 用 `import main_process1` 时不会触发这个while循环,
+# 只执行上面"建库+定义ask()/draft()"的部分,供Streamlit调用。
 if __name__ == "__main__":
     print("\n" + "=" * 50)
     print("论文问答助手已就绪,输入问题开始提问(输入 退出 结束)")
